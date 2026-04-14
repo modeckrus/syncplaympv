@@ -11,6 +11,8 @@ use tokio::sync::mpsc;
 pub enum MpvEvent {
     Pause,
     Unpause,
+    /// Playback time changed (seconds)
+    TimePos(f64),
     Disconnected,
 }
 
@@ -19,13 +21,31 @@ pub enum MpvEvent {
 pub enum MpvCommand {
     Play,
     Pause,
+    /// Seek to a specific time (seconds)
+    Seek(f64),
 }
 
-/// MPV IPC event (raw JSON)
+/// MPV IPC event (raw JSON) — all fields optional, we pattern-match after parsing
 #[derive(Debug, Deserialize)]
 struct MpvEventRaw {
+    /// Present in all events: "property-change", "shutdown", "file-loaded", "end-file", etc.
     #[serde(default)]
     event: Option<String>,
+    /// Present in replies to commands
+    #[serde(default)]
+    error: Option<String>,
+    /// Present in replies and property-change events
+    #[serde(default)]
+    data: Option<serde_json::Value>,
+    /// Present in command replies
+    #[serde(default)]
+    request_id: Option<u64>,
+    /// Present in property-change events: the numeric ID from observe_property
+    #[serde(default)]
+    id: Option<u64>,
+    /// Present in property-change events: the property name
+    #[serde(default)]
+    name: Option<String>,
 }
 
 /// Cross-platform MPV socket path
@@ -103,6 +123,34 @@ impl MpvClient {
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<MpvCommand>(32);
         let (event_tx, event_rx) = mpsc::channel::<MpvEvent>(32);
 
+        // Observe properties we care about: pause state and playback time
+        // ID 1 = pause property, ID 2 = playback-time property
+        writer
+            .write_all(
+                serde_json::json!({
+                    "command": ["observe_property", 1, "pause"]
+                })
+                .to_string()
+                .as_bytes(),
+            )
+            .await
+            .context("Failed to observe pause property")?;
+        writer.write_all(b"\n").await?;
+
+        writer
+            .write_all(
+                serde_json::json!({
+                    "command": ["observe_property", 2, "playback-time"]
+                })
+                .to_string()
+                .as_bytes(),
+            )
+            .await
+            .context("Failed to observe playback-time property")?;
+        writer.write_all(b"\n").await?;
+
+        println!("[MPV] Observing pause and playback-time properties");
+
         // Read events from MPV
         tokio::spawn(async move {
             let mut line = String::new();
@@ -119,21 +167,72 @@ impl MpvClient {
                             continue;
                         }
 
-                        if let Ok(event) = serde_json::from_str::<MpvEventRaw>(line) {
-                            if let Some(event_name) = event.event {
-                                match event_name.as_str() {
-                                    "pause" => {
-                                        println!("[MPV] Raw event: pause");
-                                        let _ = event_tx.send(MpvEvent::Pause).await;
+                        match serde_json::from_str::<MpvEventRaw>(line) {
+                            Ok(raw) => {
+                                // Check if this is a property-change event
+                                if raw.event.as_deref() == Some("property-change") {
+                                    match (raw.id, raw.name.as_deref()) {
+                                        (Some(1), Some("pause")) => {
+                                            // pause property: true = paused, false = playing
+                                            if let Some(serde_json::Value::Bool(paused)) = raw.data
+                                            {
+                                                if paused {
+                                                    println!("[MPV] Property change: pause=true");
+                                                    let _ = event_tx.send(MpvEvent::Pause).await;
+                                                } else {
+                                                    println!("[MPV] Property change: pause=false");
+                                                    let _ = event_tx.send(MpvEvent::Unpause).await;
+                                                }
+                                            }
+                                        }
+                                        (Some(2), Some("playback-time")) => {
+                                            // playback-time property: float seconds, or null
+                                            if let Some(val) = raw.data {
+                                                if let Some(time) = val.as_f64() {
+                                                    let _ = event_tx
+                                                        .send(MpvEvent::TimePos(time))
+                                                        .await;
+                                                }
+                                            }
+                                        }
+                                        _ => {
+                                            println!(
+                                                "[MPV] Property change: id={:?} name={:?} (ignored)",
+                                                raw.id, raw.name
+                                            );
+                                        }
                                     }
-                                    "unpause" => {
-                                        println!("[MPV] Raw event: unpause");
-                                        let _ = event_tx.send(MpvEvent::Unpause).await;
-                                    }
-                                    _ => {
-                                        println!("[MPV] Raw event: {} (ignored)", event_name);
+                                } else if let Some(event_name) = raw.event {
+                                    match event_name.as_str() {
+                                        "shutdown" => {
+                                            println!("[MPV] Raw event: shutdown");
+                                            let _ = event_tx.send(MpvEvent::Disconnected).await;
+                                            break;
+                                        }
+                                        "file-loaded" => {
+                                            println!("[MPV] Raw event: file-loaded");
+                                        }
+                                        "end-file" => {
+                                            println!("[MPV] Raw event: end-file");
+                                        }
+                                        _ => {
+                                            if let Some(err) = raw.error {
+                                                println!(
+                                                    "[MPV] Reply error: {} request_id={:?}",
+                                                    err, raw.request_id
+                                                );
+                                            } else {
+                                                println!(
+                                                    "[MPV] Raw event: {} (ignored)",
+                                                    event_name
+                                                );
+                                            }
+                                        }
                                     }
                                 }
+                            }
+                            Err(e) => {
+                                println!("[MPV] Failed to parse event JSON: {} | raw: {}", e, line);
                             }
                         }
                     }
@@ -159,6 +258,11 @@ impl MpvClient {
                     MpvCommand::Pause => {
                         serde_json::json!({
                             "command": ["set_property", "pause", true]
+                        })
+                    }
+                    MpvCommand::Seek(time) => {
+                        serde_json::json!({
+                            "command": ["seek", time, "absolute"]
                         })
                     }
                 };

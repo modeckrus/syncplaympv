@@ -10,6 +10,8 @@ use tspawn::A;
 pub enum SyncEvent {
     Play,
     Pause,
+    /// Seek to position (seconds)
+    Seek(f64),
 }
 
 /// Serialize event to string for network transmission
@@ -17,12 +19,19 @@ pub fn serialize_event(event: &SyncEvent) -> String {
     match event {
         SyncEvent::Play => "PLAY\n".to_string(),
         SyncEvent::Pause => "PAUSE\n".to_string(),
+        SyncEvent::Seek(time) => format!("SEEK {}\n", time),
     }
 }
 
 /// Parse string to event
 pub fn parse_event(line: &str) -> Option<SyncEvent> {
-    match line.trim() {
+    let trimmed = line.trim();
+    if let Some(time_str) = trimmed.strip_prefix("SEEK ") {
+        if let Ok(time) = time_str.parse::<f64>() {
+            return Some(SyncEvent::Seek(time));
+        }
+    }
+    match trimmed {
         "PLAY" => Some(SyncEvent::Play),
         "PAUSE" => Some(SyncEvent::Pause),
         _ => None,

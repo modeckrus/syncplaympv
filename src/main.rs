@@ -87,6 +87,7 @@ async fn run_client(server: String, port: u16, mpv_socket: Option<PathBuf>) -> R
 
     // Main loop: bridge MPV ↔ relay server
     let mut is_paused = true; // Start in paused state
+    let mut current_time: f64 = 0.0;
     loop {
         tokio::select! {
             // MPV event → send to relay server
@@ -105,6 +106,9 @@ async fn run_client(server: String, port: u16, mpv_socket: Option<PathBuf>) -> R
                         println!("[NET]   Sending PLAY to relay server...");
                         let _ = events_to_server.send(SyncEvent::Play).await;
                         println!("[NET]   PLAY sent");
+                    }
+                    mpv::MpvEvent::TimePos(time) => {
+                        current_time = time;
                     }
                     mpv::MpvEvent::Disconnected => {
                         eprintln!("\n[ERROR] MPV disconnected, exiting...");
@@ -136,6 +140,13 @@ async fn run_client(server: String, port: u16, mpv_socket: Option<PathBuf>) -> R
                         } else {
                             println!("[EVENT] NET → PAUSE received (already paused, ignored)");
                         }
+                    }
+                    SyncEvent::Seek(time) => {
+                        println!("[EVENT] NET → SEEK {:.2} command received from relay", time);
+                        println!("[MPV]   Sending Seek command to MPV...");
+                        current_time = time;
+                        let _ = mpv_cmd_tx.send(MpvCommand::Seek(time)).await;
+                        println!("[MPV]   Seek command sent");
                     }
                 }
             }
