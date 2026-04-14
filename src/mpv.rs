@@ -5,6 +5,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::process::Command;
 use tokio::sync::mpsc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Events from MPV that we care about
 #[derive(Debug, Clone)]
@@ -48,15 +49,19 @@ struct MpvEventRaw {
     name: Option<String>,
 }
 
-/// Cross-platform MPV socket path
+/// Cross-platform MPV socket path — unique per client instance
 pub fn default_socket_path() -> PathBuf {
+    // PID + atomic counter to avoid collisions when multiple clients run on the same machine
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let pid = std::process::id();
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let suffix = format!("{:x}_{:x}", pid, seq);
+
     if cfg!(windows) {
-        // Windows: use named pipe prefix or temp dir
         let temp = std::env::temp_dir();
-        temp.join("mpv_sync.sock")
+        temp.join(format!("mpv_sync_{}.sock", suffix))
     } else {
-        // Linux/macOS: Unix socket in /tmp
-        PathBuf::from("/tmp/mpv_sync.sock")
+        PathBuf::from(format!("/tmp/mpv_sync_{}.sock", suffix))
     }
 }
 
