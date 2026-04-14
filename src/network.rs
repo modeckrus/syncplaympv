@@ -44,14 +44,18 @@ impl RelayServer {
 
     pub async fn run(&self) -> Result<()> {
         let listener = TcpListener::bind(format!("0.0.0.0:{}", self.port)).await?;
-        println!("Relay server listening on port {}", self.port);
+        println!("[SERVER] Relay server listening on port {}", self.port);
 
         // Shared list of connected clients using tspawn
         let clients: A<Vec<mpsc::Sender<SyncEvent>>> = A::new(Vec::new());
 
         loop {
             let (stream, addr) = listener.accept().await?;
-            println!("Client connected: {}", addr);
+            println!(
+                "[SERVER] Client connected: {} (total: {})",
+                addr,
+                clients.read().len() + 1
+            );
 
             let (tx, rx) = mpsc::channel::<SyncEvent>(32);
 
@@ -69,7 +73,11 @@ impl RelayServer {
                 // Clean up: remove closed clients
                 let mut c = clients_for_handler.write();
                 c.retain(|tx| !tx.is_closed());
-                println!("Client disconnected: {}", addr);
+                println!(
+                    "[SERVER] Client disconnected: {} (total: {})",
+                    addr,
+                    c.len()
+                );
             });
         }
     }
@@ -100,7 +108,11 @@ async fn handle_client(
                 }
                 Ok(_) => {
                     if let Some(event) = parse_event(&line) {
-                        println!("[{}] Broadcasting: {:?}", addr, event);
+                        let total = clients_for_read.read().len();
+                        println!(
+                            "[SERVER] Received {:?} from {} → broadcasting to {} client(s)",
+                            event, addr, total
+                        );
                         // Broadcast to ALL connected clients
                         let mut c = clients_for_read.write();
                         c.retain(|tx| !tx.is_closed());
@@ -170,16 +182,17 @@ impl RelayClient {
                 match reader.read_line(&mut line).await {
                     Ok(0) => {
                         // EOF — server disconnected
-                        eprintln!("Relay server disconnected");
+                        eprintln!("[NET] Relay server disconnected");
                         break;
                     }
                     Ok(_) => {
                         if let Some(event) = parse_event(&line) {
+                            println!("[NET] Received {:?} from relay server", event);
                             let _ = events_from_peers_tx.send(event).await;
                         }
                     }
                     Err(e) => {
-                        eprintln!("Error reading from relay server: {}", e);
+                        eprintln!("[NET] Error reading from relay server: {}", e);
                         break;
                     }
                 }
@@ -189,9 +202,10 @@ impl RelayClient {
         // Write task: send events TO server (from local MPV or forwarded)
         tokio::spawn(async move {
             while let Some(event) = events_to_server_rx.recv().await {
+                println!("[NET] Sending {:?} to relay server", event);
                 let msg = serialize_event(&event);
                 if let Err(e) = writer.write_all(msg.as_bytes()).await {
-                    eprintln!("Error sending to relay server: {}", e);
+                    eprintln!("[NET] Error sending to relay server: {}", e);
                     break;
                 }
             }

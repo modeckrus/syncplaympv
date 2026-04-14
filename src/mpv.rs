@@ -123,12 +123,16 @@ impl MpvClient {
                             if let Some(event_name) = event.event {
                                 match event_name.as_str() {
                                     "pause" => {
+                                        println!("[MPV] Raw event: pause");
                                         let _ = event_tx.send(MpvEvent::Pause).await;
                                     }
                                     "unpause" => {
+                                        println!("[MPV] Raw event: unpause");
                                         let _ = event_tx.send(MpvEvent::Unpause).await;
                                     }
-                                    _ => {} // Ignore other events
+                                    _ => {
+                                        println!("[MPV] Raw event: {} (ignored)", event_name);
+                                    }
                                 }
                             }
                         }
@@ -145,6 +149,7 @@ impl MpvClient {
         // Send commands to MPV
         tokio::spawn(async move {
             while let Some(cmd) = cmd_rx.recv().await {
+                println!("[MPV] Sending command: {:?}", cmd);
                 let json = match cmd {
                     MpvCommand::Play => {
                         serde_json::json!({
@@ -159,13 +164,14 @@ impl MpvClient {
                 };
 
                 if let Err(e) = writer.write_all(json.to_string().as_bytes()).await {
-                    eprintln!("Failed to send command to MPV: {}", e);
+                    eprintln!("[MPV] Failed to send command to MPV: {}", e);
                     break;
                 }
                 if let Err(e) = writer.write_all(b"\n").await {
-                    eprintln!("Failed to send command to MPV: {}", e);
+                    eprintln!("[MPV] Failed to send command to MPV: {}", e);
                     break;
                 }
+                println!("[MPV] Command sent OK");
             }
         });
 
