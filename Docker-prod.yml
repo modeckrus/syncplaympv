@@ -1,0 +1,7 @@
+version: "3.9"
+
+services:
+  server:
+    image: syncplaympvserver:latest
+    ports:
+      - 5001:5001

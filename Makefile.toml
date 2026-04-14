@@ -1,0 +1,15 @@
+[tasks.build-server]
+command = "cargo"
+args = ["build", "--release", "--target", "x86_64-unknown-linux-musl"]
+[tasks.docker-build]
+script = "docker build --platform linux/amd64 -f Dockerfile -t syncplaympvserver:latest ."
+[tasks.docker-save]
+script = "mkdir -p ./target/docker && cd ./target/docker && docker save syncplaympvserver:latest | gzip > syncplaympvserver.tar.gz"
+[tasks.docker-all]
+dependencies = ["build-server", "docker-build", "docker-save"]
+
+# docker context use rootless
+# docker context use server
+# docker --context server stack remove syncplaympv
+# docker --context server load -i ./target/docker/syncplaympvserver.tar.gz
+# docker --context server stack deploy -c Docker-prod.yml syncplaympv --detach=false

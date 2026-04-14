@@ -3,6 +3,14 @@ name = "syncplaympv"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "syncplaympv-server"
+path = "bin/server.rs"
+
+[[bin]]
+name = "syncplaympv-client"
+path = "bin/client.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full", "process"] }
 serde = { version = "1", features = ["derive"] }
