@@ -7,6 +7,9 @@ script = "docker build --platform linux/amd64 -f Dockerfile -t syncplaympvserver
 script = "mkdir -p ./target/docker && cd ./target/docker && docker save syncplaympvserver:latest | gzip > syncplaympvserver.tar.gz"
 [tasks.docker-all]
 dependencies = ["build-server", "docker-build", "docker-save"]
+[tasks.build-windows]
+command = "cargo"
+args = ["xwin","build","--target x86_64-pc-windows-msvc","--release"]
 
 # docker context use rootless
 # docker context use server
