@@ -1,10 +1,10 @@
-
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::Parser;
-use syncplaympv::mpv::{self, MpvClient, MpvCommand};
-use syncplaympv::network::{self, ClientEvent, RelayClient, ServerEvent};
+use rfd::FileDialog;
 use std::path::PathBuf;
 use std::time::Duration;
+use syncplaympv::mpv::{self, MpvClient, MpvCommand};
+use syncplaympv::network::{self, ClientEvent, RelayClient, ServerEvent};
 use tokio::time::Instant;
 
 #[derive(Parser)]
@@ -22,6 +22,14 @@ struct Cli {
     /// MPV IPC socket path (auto-detected if not specified)
     #[arg(long)]
     mpv_socket: Option<PathBuf>,
+
+    /// Video file path
+    #[arg(short = 'v', long)]
+    video: Option<PathBuf>,
+
+    /// External audio file path
+    #[arg(short = 'a', long)]
+    audio: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -31,12 +39,29 @@ async fn main() -> Result<()> {
     println!("Starting client mode...");
     println!("Relay server: {}:{}", cli.server, cli.port);
 
+    // Resolve video/audio: use CLI flags or fall back to file picker
+    let (video, audio) = match (cli.video, cli.audio) {
+        (Some(v), Some(a)) => (Some(v), Some(a)),
+        (Some(v), None) => (Some(v), None),
+        (None, _) => {
+            println!("[INIT] No files specified — opening file picker...");
+            let video = FileDialog::new().set_title("Select video file").pick_file();
+            let Some(video) = video else {
+                bail!("No video file selected");
+            };
+            let audio = FileDialog::new()
+                .set_title("Select audio file (optional — close to skip)")
+                .pick_file();
+            (Some(video), audio)
+        }
+    };
+
     // Determine MPV socket path
     let socket_path = cli.mpv_socket.unwrap_or_else(|| mpv::default_socket_path());
 
     // Launch MPV
     println!("[INIT] Launching MPV...");
-    let mut mpv_child = mpv::launch_mpv(&socket_path).await?;
+    let mut mpv_child = mpv::launch_mpv(&socket_path, video.as_deref(), audio.as_deref()).await?;
 
     // Connect to MPV IPC
     println!("[INIT] Connecting to MPV IPC socket...");
@@ -45,7 +70,10 @@ async fn main() -> Result<()> {
     println!("[INIT] Connected to MPV IPC");
 
     // Connect to relay server (includes clock sync)
-    println!("[INIT] Connecting to relay server at {}:{}", cli.server, cli.port);
+    println!(
+        "[INIT] Connecting to relay server at {}:{}",
+        cli.server, cli.port
+    );
     let relay_client = RelayClient::new(cli.server, cli.port);
     let (events_to_server, mut events_from_server, clock_sync) = relay_client.connect().await?;
     println!(
@@ -239,10 +267,7 @@ async fn schedule_seek(
     let instant = deadline_to_instant(deadline_ms, clock_sync);
     let now = Instant::now();
     let delay = instant.saturating_duration_since(now);
-    println!(
-        "[SCHED] SEEK_AT: seek to {:.2}s in {:?}",
-        pos_sec, delay
-    );
+    println!("[SCHED] SEEK_AT: seek to {:.2}s in {:?}", pos_sec, delay);
 
     if instant > now {
         tokio::time::sleep_until(instant).await;

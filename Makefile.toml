@@ -11,6 +11,84 @@ dependencies = ["build-server", "docker-build", "docker-save"]
 command = "cargo"
 args = ["xwin","build","--target x86_64-pc-windows-msvc","--release"]
 
+[tasks.build-windows-release]
+command = "cargo"
+args = ["xwin", "build", "--target", "x86_64-pc-windows-msvc", "--release"]
+
+[tasks.package-windows]
+description = "Build and package a ready-to-use ZIP for Windows"
+dependencies = ["build-windows-release"]
+condition = { platforms = ["linux", "mac"] }
+script_runner = "@shell"
+script = """
+# Set output paths (use absolute paths!)
+PROJECT_DIR="$(pwd)"
+DIST_DIR="${PROJECT_DIR}/target/dist"
+ZIP_NAME="syncplaympv-windows.zip"
+ZIP_PATH="${DIST_DIR}/${ZIP_NAME}"
+TARGET_BIN="${PROJECT_DIR}/target/x86_64-pc-windows-msvc/release"
+
+# Create dist directory
+mkdir -p "${DIST_DIR}"
+
+# Create temp staging folder
+STAGING=$(mktemp -d)
+mkdir -p "${STAGING}/syncplaympv"
+
+# Copy binaries
+cp "${TARGET_BIN}/syncplaympv-client.exe" "${STAGING}/syncplaympv/"
+cp "${TARGET_BIN}/syncplaympv-server.exe" "${STAGING}/syncplaympv/"
+
+# Copy MPV dependencies
+cp "${PROJECT_DIR}/mpvbins/mpv.exe" "${STAGING}/syncplaympv/"
+cp "${PROJECT_DIR}/mpvbins/mpv.com" "${STAGING}/syncplaympv/"
+cp "${PROJECT_DIR}/mpvbins/vulkan-1.dll" "${STAGING}/syncplaympv/"
+cp "${PROJECT_DIR}/mpvbins/mpv-register.bat" "${STAGING}/syncplaympv/"
+cp "${PROJECT_DIR}/mpvbins/mpv-unregister.bat" "${STAGING}/syncplaympv/"
+
+# Create ZIP
+cd "${STAGING}"
+zip -r "${ZIP_PATH}" syncplaympv
+
+# Cleanup
+rm -rf "${STAGING}"
+
+echo "Package created: ${ZIP_PATH}"
+"""
+
+[tasks._package-windows-cmd]
+description = "Internal: Windows packaging (runs only on Windows)"
+dependencies = ["build-windows-release"]
+condition = { platforms = ["windows"] }
+script_runner = "cmd"
+script = [
+    "set DIST_DIR=target\\dist",
+    "set ZIP_NAME=syncplaympv-windows.zip",
+    "set ZIP_PATH=%DIST_DIR%\\%ZIP_NAME%",
+    "set TARGET_BIN=target\\x86_64-pc-windows-msvc\\release",
+    "",
+    "if not exist %DIST_DIR% mkdir %DIST_DIR%",
+    "",
+    "set STAGING=%TEMP%\\syncplaympv-staging",
+    "if exist %STAGING% rmdir /s /q %STAGING%",
+    "mkdir %STAGING%\\syncplaympv",
+    "",
+    "copy %TARGET_BIN%\\syncplaympv-client.exe %STAGING%\\syncplaympv\\",
+    "copy %TARGET_BIN%\\syncplaympv-server.exe %STAGING%\\syncplaympv\\",
+    "copy mpvbins\\mpv.exe %STAGING%\\syncplaympv\\",
+    "copy mpvbins\\mpv.com %STAGING%\\syncplaympv\\",
+    "copy mpvbins\\vulkan-1.dll %STAGING%\\syncplaympv\\",
+    "copy mpvbins\\mpv-register.bat %STAGING%\\syncplaympv\\",
+    "copy mpvbins\\mpv-unregister.bat %STAGING%\\syncplaympv\\",
+    "",
+    "cd %STAGING%",
+    "powershell -NoProfile -Command \"Compress-Archive -Path syncplaympv -DestinationPath '%ZIP_PATH%' -Force\"",
+    "",
+    "rmdir /s /q %STAGING%",
+    "",
+    "echo Package created: %ZIP_PATH%",
+]
+
 # docker context use rootless
 # docker context use server
 # docker --context server stack remove syncplaympv

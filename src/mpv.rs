@@ -70,16 +70,29 @@ pub fn mpv_socket_arg(path: &Path) -> String {
     }
 }
 
-pub async fn launch_mpv(socket_path: &Path) -> Result<tokio::process::Child> {
+pub async fn launch_mpv(
+    socket_path: &Path,
+    video: Option<&Path>,
+    audio: Option<&Path>,
+) -> Result<tokio::process::Child> {
     let socket_arg = mpv_socket_arg(socket_path);
     println!("Launching MPV with IPC: {}", socket_arg);
 
-    let mut child = tokio::process::Command::new("mpv")
-        .arg(format!("--input-ipc-server={}", socket_arg))
+    let mut cmd = tokio::process::Command::new("mpv");
+    cmd.arg(format!("--input-ipc-server={}", socket_arg))
         .arg("--no-terminal")
         .arg("--keep-open=yes")
         .arg("--idle=yes")
-        .arg("--force-window=yes")
+        .arg("--force-window=yes");
+
+    if let Some(v) = video {
+        cmd.arg(v);
+    }
+    if let Some(a) = audio {
+        cmd.arg(format!("--audio-file={}", a.to_string_lossy()));
+    }
+
+    let mut child = cmd
         .spawn()
         .context("Failed to launch MPV. Make sure 'mpv' is in your PATH")?;
 
@@ -106,7 +119,10 @@ async fn send_observe_commands<W: AsyncWriteExt + Unpin>(writer: &mut W) -> Resu
         .write_all(cmd1.as_bytes())
         .await
         .context("Failed to write observe_property pause")?;
-    writer.write_all(b"\n").await.context("Failed to write newline")?;
+    writer
+        .write_all(b"\n")
+        .await
+        .context("Failed to write newline")?;
 
     let cmd2 = serde_json::json!({
         "command": ["observe_property", 2, "playback-time"]
@@ -116,7 +132,10 @@ async fn send_observe_commands<W: AsyncWriteExt + Unpin>(writer: &mut W) -> Resu
         .write_all(cmd2.as_bytes())
         .await
         .context("Failed to write observe_property playback-time")?;
-    writer.write_all(b"\n").await.context("Failed to write newline")?;
+    writer
+        .write_all(b"\n")
+        .await
+        .context("Failed to write newline")?;
 
     Ok(())
 }
