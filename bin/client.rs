@@ -39,7 +39,6 @@ async fn main() -> Result<()> {
     println!("Starting client mode...");
     println!("Relay server: {}:{}", cli.server, cli.port);
 
-    // Resolve video/audio: use CLI flags or fall back to file picker
     let (video, audio) = match (cli.video, cli.audio) {
         (Some(v), Some(a)) => (Some(v), Some(a)),
         (Some(v), None) => (Some(v), None),
@@ -56,49 +55,43 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Determine MPV socket path
     let socket_path = cli.mpv_socket.unwrap_or_else(|| mpv::default_socket_path());
 
-    // Launch MPV
     println!("[INIT] Launching MPV...");
     let mut mpv_child = mpv::launch_mpv(&socket_path, video.as_deref(), audio.as_deref()).await?;
 
-    // Connect to MPV IPC
     println!("[INIT] Connecting to MPV IPC socket...");
     let mpv_client = MpvClient::new(socket_path.clone());
     let (mpv_cmd_tx, mut mpv_event_rx) = mpv_client.connect().await?;
     println!("[INIT] Connected to MPV IPC");
 
-    // Connect to relay server (includes clock sync)
-    println!(
-        "[INIT] Connecting to relay server at {}:{}",
-        cli.server, cli.port
-    );
-    let relay_client = RelayClient::new(cli.server, cli.port);
-    let (events_to_server, mut events_from_server, clock_sync) = relay_client.connect().await?;
+    let mut is_paused = true;
+    let mut current_time: f64 = 0.0;
+    let suppress_duration = Duration::from_millis(400);
+    let mut suppress_until: Option<Instant> = None;
+
+    // Relay connection state — replaced on each reconnect
+    let relay_client = RelayClient::new(cli.server.clone(), cli.port);
+    let (mut events_to_server, mut events_from_server, mut clock_sync) =
+        relay_client.connect().await?;
     println!(
         "[INIT] Connected to relay server (clock offset: {}ms)",
         clock_sync.offset_ms
     );
-    println!("[INIT] === Ready! Drag a file into MPV and press play ===");
-    println!("[INIT] Waiting for events...\n");
+    println!("[INIT] === Ready! Drag a file into MPV and press play ===\n");
 
-    // Main loop: bridge MPV ↔ relay server
-    let mut is_paused = true;
-    let mut current_time: f64 = 0.0;
-    // Suppress local MPV events that are side-effects of our own commands (e.g. seek → pause).
-    let suppress_duration = Duration::from_millis(400);
-    let mut suppress_until: Option<Instant> = None;
+    // On first connect we ARE a late joiner, so handle State normally.
+    // On reconnect we skip State to avoid disrupting ongoing playback.
+    let mut is_reconnect = false;
 
     loop {
         tokio::select! {
-            // MPV event → react and send to relay server (only if not suppressed)
             Some(mpv_event) = mpv_event_rx.recv() => {
                 match mpv_event {
                     mpv::MpvEvent::Pause => {
                         if let Some(deadline) = suppress_until {
                             if Instant::now() < deadline {
-                                println!("[MPV] Pause event (suppressed — side effect of our command)");
+                                println!("[MPV] Pause event (suppressed)");
                                 continue;
                             } else {
                                 suppress_until = None;
@@ -107,13 +100,12 @@ async fn main() -> Result<()> {
                         println!("[MPV] Pause event (local)");
                         is_paused = true;
                         let pos_ms = (current_time * 1000.0) as u64;
-                        println!("[NET] Sending PAUSE_READY pos={}ms", pos_ms);
                         let _ = events_to_server.send(ClientEvent::PauseReady(pos_ms)).await;
                     }
                     mpv::MpvEvent::Unpause => {
                         if let Some(deadline) = suppress_until {
                             if Instant::now() < deadline {
-                                println!("[MPV] Unpause event (suppressed — side effect of our command)");
+                                println!("[MPV] Unpause event (suppressed)");
                                 continue;
                             } else {
                                 suppress_until = None;
@@ -122,7 +114,6 @@ async fn main() -> Result<()> {
                         println!("[MPV] Play event (local)");
                         is_paused = false;
                         let pos_ms = (current_time * 1000.0) as u64;
-                        println!("[NET] Sending READY pos={}ms", pos_ms);
                         let _ = events_to_server.send(ClientEvent::Ready(pos_ms)).await;
                         is_paused = true;
                         suppress_until = Some(Instant::now() + suppress_duration);
@@ -137,29 +128,62 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            // Relay server event → schedule actions
+
             Some(net_event) = events_from_server.recv() => {
                 match net_event {
+                    ServerEvent::Disconnected => {
+                        eprintln!("[NET] Lost connection to relay server, reconnecting...");
+                        loop {
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            match relay_client.connect().await {
+                                Ok((tx, rx, cs)) => {
+                                    events_to_server = tx;
+                                    events_from_server = rx;
+                                    clock_sync = cs;
+                                    is_reconnect = true;
+                                    println!(
+                                        "[NET] Reconnected to relay server (clock offset: {}ms)",
+                                        clock_sync.offset_ms
+                                    );
+                                    break;
+                                }
+                                Err(e) => {
+                                    eprintln!("[NET] Reconnect failed: {}, retrying...", e);
+                                }
+                            }
+                        }
+                    }
                     ServerEvent::Pong { .. } => {}
+                    ServerEvent::State { playing, pos_ms, playback_started_at_ms } => {
+                        if is_reconnect {
+                            println!(
+                                "[STATE] Reconnect: skipping state sync (playing={} pos={}ms)",
+                                playing, pos_ms
+                            );
+                            is_reconnect = false;
+                        } else {
+                            handle_state(&mpv_cmd_tx, playing, pos_ms as f64 / 1000.0, playback_started_at_ms, &clock_sync, &mut is_paused, &mut current_time).await;
+                            suppress_until = Some(Instant::now() + suppress_duration);
+                        }
+                    }
                     ServerEvent::Start { deadline_ms, pos_ms } => {
+                        is_reconnect = false;
                         schedule_play(&mpv_cmd_tx, &clock_sync, deadline_ms, pos_ms, &mut is_paused).await;
                         suppress_until = Some(Instant::now() + suppress_duration);
                     }
                     ServerEvent::PauseAt { deadline_ms, pos_ms } => {
+                        is_reconnect = false;
                         schedule_pause(&mpv_cmd_tx, &clock_sync, deadline_ms, pos_ms, &mut is_paused).await;
                         suppress_until = Some(Instant::now() + suppress_duration);
                     }
                     ServerEvent::SeekAt { deadline_ms, pos_ms } => {
+                        is_reconnect = false;
                         schedule_seek(&mpv_cmd_tx, &clock_sync, deadline_ms, pos_ms, &mut is_paused, &mut current_time).await;
-                        suppress_until = Some(Instant::now() + suppress_duration);
-                    }
-                    ServerEvent::State { playing, pos_ms, playback_started_at_ms } => {
-                        handle_state(&mpv_cmd_tx, playing, pos_ms as f64 / 1000.0, playback_started_at_ms, &clock_sync, &mut is_paused, &mut current_time).await;
                         suppress_until = Some(Instant::now() + suppress_duration);
                     }
                 }
             }
-            // Ctrl+C received
+
             _ = tokio::signal::ctrl_c() => {
                 println!("\n[INIT] Ctrl+C received, shutting down...");
                 break;
@@ -167,22 +191,15 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Clean up MPV process
     if let Err(e) = mpv_child.kill().await {
         eprintln!("Failed to kill MPV process: {}", e);
     }
-
-    // Clean up socket file on Unix
     if !cfg!(windows) {
         let _ = std::fs::remove_file(&socket_path);
     }
 
     Ok(())
 }
-
-// ============================================================================
-// Scheduled action helpers
-// ============================================================================
 
 fn deadline_to_instant(deadline_ms: u64, clock_sync: &network::ClockSync) -> Instant {
     let local_deadline_ms = clock_sync.server_to_local_ms(deadline_ms);
@@ -212,10 +229,8 @@ async fn schedule_play(
     if instant > now {
         tokio::time::sleep_until(instant).await;
     } else {
-        let elapsed = now.saturating_duration_since(instant);
-        let elapsed_ms = elapsed.as_millis() as u64;
-        let adjusted_pos = pos_ms + elapsed_ms;
-        let adjusted_sec = adjusted_pos as f64 / 1000.0;
+        let elapsed_ms = now.saturating_duration_since(instant).as_millis() as u64;
+        let adjusted_sec = (pos_ms + elapsed_ms) as f64 / 1000.0;
         println!(
             "[SCHED] Deadline passed, compensating: seek to {:.2}s",
             adjusted_sec

@@ -27,7 +27,10 @@ pub enum ClientEvent {
 #[derive(Debug, Clone)]
 pub enum ServerEvent {
     /// Clock sync ответ: серверный timestamp + эхо клиентского
-    Pong { server_ts_ms: u64, client_ts_ms: u64 },
+    Pong {
+        server_ts_ms: u64,
+        client_ts_ms: u64,
+    },
     /// Начать воспроизведение: wall_clock_deadline_ms + позиция_ms
     Start { deadline_ms: u64, pos_ms: u64 },
     /// Поставить на паузу: wall_clock_deadline_ms + позиция_ms
@@ -42,6 +45,8 @@ pub enum ServerEvent {
         /// Если playing=false — ignored.
         playback_started_at_ms: Option<u64>,
     },
+    /// TCP соединение с сервером разорвано
+    Disconnected,
 }
 
 /// Milliseconds since UNIX epoch
@@ -98,6 +103,7 @@ pub fn serialize_server_event(ev: &ServerEvent) -> String {
                 started
             )
         }
+        ServerEvent::Disconnected => unreachable!("Disconnected is client-only"),
     }
 }
 
@@ -405,10 +411,7 @@ async fn broadcast(
     let mut c = clients.write();
     c.retain(|tx| !tx.is_closed());
     let total = c.len();
-    println!(
-        "[SERVER] Broadcasting {:?} to {} client(s)",
-        event, total
-    );
+    println!("[SERVER] Broadcasting {:?} to {} client(s)", event, total);
     for tx in c.iter() {
         let _ = tx.send(event.clone()).await;
     }
@@ -458,7 +461,9 @@ impl RelayClient {
     /// - Sender: to send ClientEvent to server
     /// - Receiver: to receive ServerEvent from server
     /// - ClockSync: clock offset for scheduling
-    pub async fn connect(&self) -> Result<(
+    pub async fn connect(
+        &self,
+    ) -> Result<(
         mpsc::Sender<ClientEvent>,
         mpsc::Receiver<ServerEvent>,
         ClockSync,
@@ -477,9 +482,7 @@ impl RelayClient {
         // --- Clock sync: ping-pong ---
         let ping_ts = now_ms();
         let ping_msg = serialize_client_event(&ClientEvent::Ping(ping_ts));
-        writer
-            .write_all(ping_msg.as_bytes())
-            .await?;
+        writer.write_all(ping_msg.as_bytes()).await?;
         println!("[NET] Sent PING at local_ts={}", ping_ts);
 
         // Read PONG response
@@ -535,6 +538,9 @@ impl RelayClient {
                 match reader.read_line(&mut line).await {
                     Ok(0) => {
                         eprintln!("[NET] Relay server disconnected");
+                        let _ = events_from_server_tx_clone
+                            .send(ServerEvent::Disconnected)
+                            .await;
                         break;
                     }
                     Ok(_) => {
@@ -547,6 +553,9 @@ impl RelayClient {
                     }
                     Err(e) => {
                         eprintln!("[NET] Error reading from relay server: {}", e);
+                        let _ = events_from_server_tx_clone
+                            .send(ServerEvent::Disconnected)
+                            .await;
                         break;
                     }
                 }
